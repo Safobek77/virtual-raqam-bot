@@ -8,6 +8,7 @@ from aiogram.types import KeyboardButton, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from flask import Flask
 from threading import Thread
+from zoneinfo import ZoneInfo
 
 
 # ================== 1. Flask server ==================
@@ -28,6 +29,7 @@ Thread(target=run_flask, daemon=True).start()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID_STR = os.getenv("ADMIN_ID")
 ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else None
+CHANNEL_ID = "@virtual_raqam_USA_nomer"  
 
 BALANCE_FILE = "balances.json"
 USERS_FILE = "users.json"
@@ -41,6 +43,30 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ================= UTIL FUNCTIONS =================
+
+async def check_subscription(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except:
+        return False
+
+def subscribe_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(
+            text="📢 Kanalga obuna bo‘lish",
+            url=f"https://t.me/{CHANNEL_ID.lstrip('@')}"
+        )
+    )
+    kb.row(
+        InlineKeyboardButton(
+            text="✅ Tekshirish",
+            callback_data="check_sub"
+        )
+    )
+    return kb.as_markup()
+
 def load_users():
     try:
         with open(USERS_FILE, "r", encoding="utf-8") as f:
@@ -54,24 +80,34 @@ def save_users(users):
 
 def save_user(user: types.User, phone=None, referrer_id=None):
     users = load_users()
+
+    full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
     existing_user = next((u for u in users if u["id"] == user.id), None)
 
     if existing_user:
         existing_user["username"] = user.username
-        existing_user["first_name"] = user.first_name
+        existing_user["name"] = full_name
+
         if phone is not None:
             existing_user["phone"] = phone
+
         if referrer_id is not None:
             existing_user["referrer_id"] = referrer_id
+
     else:
         users.append({
             "id": user.id,
-            "username": user.username,
-            "first_name": user.first_name,
+            "username": user.username,   # nickname
+            "name": full_name,           # ism familiya
             "phone": phone,
-            "joined_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "referrer_id": referrer_id
+            "joined_at": datetime.now(
+                ZoneInfo("Asia/Tashkent")
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            "referrer_id": referrer_id,
+            "referral_paid": False
         })
+
     save_users(users)
 
 def load_balances():
@@ -124,8 +160,16 @@ async def start(message: types.Message):
     user_data = next((u for u in users if u["id"] == message.from_user.id), None)
 
     if user_data and user_data.get("phone"):
+        if not await check_subscription(message.from_user.id):
+            await message.answer(
+                "📢 Botdan foydalanish uchun kanalga obuna bo‘ling:",
+                reply_markup=subscribe_keyboard()
+            )
+            return
+
         await send_main_menu(message)
         return
+
 
     kb = ReplyKeyboardBuilder()
     kb.row(KeyboardButton(text="📱 Telefon raqamni yuborish", request_contact=True))
@@ -148,13 +192,32 @@ async def handle_contact(message: types.Message):
 
     save_user(message.from_user, phone=phone, referrer_id=referrer_id)
 
-    if referrer_id and referrer_id != message.from_user.id:
-        add_balance(referrer_id, 3000)
-        add_balance(message.from_user.id, 3000)
-        await message.answer("🎉 Referal bonus: 3000 so‘m!")
-
     await message.answer("✅ Telefon raqamingiz tasdiqlandi.")
+
+    # ❗ AVVAL OBUNANI TEKSHIRAMIZ
+    if not await check_subscription(message.from_user.id):
+        await message.answer(
+            "📢 Botdan foydalanish uchun kanalga obuna bo‘ling:",
+            reply_markup=subscribe_keyboard()
+        )
+        return
+
+    # ✅ FAQAT SHU YERDA REFERAL BONUS
+    if referrer_id and referrer_id != message.from_user.id:
+        balances = load_balances()
+
+        # ⚠️ Bir marta berilganini tekshiramiz
+        if not user_data.get("referral_paid"):
+            add_balance(referrer_id, 3000)
+            add_balance(message.from_user.id, 3000)
+
+            user_data["referral_paid"] = True
+            save_users(users)
+
+            await message.answer("🎉 Referal bonus: 3000 so‘m!")
+
     await send_main_menu(message)
+
 
 # ================= ADMIN BILAN BOG‘LANISH =================
 CONTACTING_USERS = {}
@@ -171,15 +234,15 @@ async def contact_admin(message: types.Message):
     await message.answer("✅ Admin xabardor qilindi.")
 
 # ================= USER → ADMIN =================
-    @dp.message(F.text & F.func(lambda m: CONTACTING_USERS.get(m.from_user.id)))
-    async def forward_to_admin(message: types.Message):
-        if message.from_user.id == ADMIN_ID:
-            return
+@dp.message(F.text & F.func(lambda m: CONTACTING_USERS.get(m.from_user.id)))
+async def forward_to_admin(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        return
 
-        await bot.send_message(
-            ADMIN_ID,
-            f"📩 Xabar:\n{message.text}\n\nID: {message.from_user.id}"
-        )
+    await bot.send_message(
+        ADMIN_ID,
+        f"📩 Xabar:\n{message.text}\n\nID: {message.from_user.id}"
+    )
 
 
 
@@ -217,12 +280,12 @@ async def show_catalog(message: types.Message):
 
     await message.answer(
         "📂 Davlatni tanlang:\n\n"
-        "🇮🇳 India — 18 000 so‘m\n"
-        "🇺🇸 USA — 20 000 so‘m\n"
-        "🇨🇦 Kanada — 20 000 so‘m\n"
-        "🇺🇿 O‘zbekiston — 25 000 so‘m\n"
-        "🇬🇧 UK — 25 000 so‘m\n"
-        "🇹🇷 Turkiya — 28 000 so‘m\n\n"
+        "🇮🇳 India — 22 000 so‘m\n"
+        "🇺🇸 USA — 25 000 so‘m\n"
+        "🇨🇦 Kanada — 25 000 so‘m\n"
+        "🇺🇿 O‘zbekiston — 29 000 so‘m\n"
+        "🇬🇧 UK — 29 000 so‘m\n"
+        "🇹🇷 Turkiya — 35 000 so‘m\n\n"
         "Tekin raqam olish uchun referal orqali do'stlaringizni taklif eting!\n\n"
         "✅ Barcha raqamlar spamsiz",
         reply_markup=kb.as_markup()
@@ -230,12 +293,12 @@ async def show_catalog(message: types.Message):
 
 # ================= BUYURTMA =================
 PRICES = {
-    "India": 18000,
-    "USA": 20000,
-    "Canada": 20000,
-    "Uzbekistan": 25000,
-    "UK": 25000,
-    "Turkey": 28000
+    "India": 22000,
+    "USA": 25000,
+    "Canada": 25000,
+    "Uzbekistan": 29000,
+    "UK": 29000,
+    "Turkey": 35000
 }
 
 @dp.callback_query(F.data.startswith("country_"))
@@ -312,6 +375,16 @@ async def send_referral(message: types.Message):
             .row(KeyboardButton(text="⬅️ Ortga"))
             .as_markup(resize_keyboard=True)
     )
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback: types.CallbackQuery):
+    if not await check_subscription(callback.from_user.id):
+        await callback.answer("❌ Hali obuna emassiz", show_alert=True)
+        return
+
+    await callback.message.delete()
+    await send_main_menu(callback.message)
+
 
 @dp.message(F.text == "⬅️ Ortga")
 async def go_back(message: types.Message):
